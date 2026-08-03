@@ -6,25 +6,27 @@ from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from datetime import datetime
 import re
 import os
-import random
+import time
 import urllib.parse
 
 # ============================================================
-BOT_TOKEN = "ВАШ_ТОКЕН_НОВОГО_БОТА"  # Вставьте сюда токен от @BotFather
+BOT_TOKEN = "8910826175:AAEEqMDhEbVW41NQwu383cxPPKa2P7BHU1k"
 CHANNEL_ID = "@zood3llotgk_proxy"
-MAX_PROXIES_PER_RUN = 3
-SOURCE_URL = "https://t.me/s/TProxyRU"
+MAX_PROXIES_PER_RUN = 5
+
+SOURCES = [
+    "https://t.me/s/ProxyMTProto",
+    "https://t.me/s/freedomvpnofficial",
+    "https://t.me/s/TProxyRU",
+    "https://t.me/s/ProxyFreeMTProto",
+    "https://t.me/s/MTPproxy",
+    "https://t.me/s/ProxyCatalog_bot",
+    "https://t.me/s/ProxyFree_Ru"
+]
 # ============================================================
 
-# Настройка постоянного диска /data на Railway
-DB_DIR = "/data"
-if not os.path.exists(DB_DIR):
-    try:
-        os.makedirs(DB_DIR, exist_ok=True)
-    except Exception:
-        DB_DIR = "."
-
-DB_FILE = os.path.join(DB_DIR, "posted_proxies.db")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_FILE = os.path.join(BASE_DIR, "posted_proxies.db")
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -32,7 +34,6 @@ HEADERS = {
 
 
 def init_db():
-    print(f"[DB] Подключение к базе прокси: {os.path.abspath(DB_FILE)}", flush=True)
     conn = sqlite3.connect(DB_FILE)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS posted (
@@ -68,9 +69,20 @@ def mark_posted(proxy_id, server, port):
         print(f"[DB ОШИБКА] Не удалось записать: {e}", flush=True)
 
 
-def fetch_proxies():
+def fetch_proxies_from_source(url):
+    resp = None
+    for attempt in range(3):
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=15)
+            if resp.status_code == 200:
+                break
+        except Exception:
+            time.sleep(2)
+
+    if not resp or resp.status_code != 200:
+        return []
+
     try:
-        resp = requests.get(SOURCE_URL, headers=HEADERS, timeout=15)
         soup = BeautifulSoup(resp.text, "html.parser")
         proxies = []
 
@@ -107,19 +119,36 @@ def fetch_proxies():
                         "secret": secret
                     })
 
-        proxies.reverse()
         return proxies
 
     except Exception as e:
-        print(f"[ПАРСИНГ ОШИБКА] {e}", flush=True)
+        print(f"[ОШИБКА ИСТОЧНИКА {url}] {e}", flush=True)
         return []
+
+
+def fetch_all_proxies():
+    all_found = []
+    seen_ids = set()
+
+    for source_url in SOURCES:
+        channel_name = source_url.split("/")[-1]
+        print(f"[ПАРСИНГ] Поиск в @{channel_name}...", flush=True)
+        
+        found = fetch_proxies_from_source(source_url)
+        for p in found:
+            if p["id"] not in seen_ids:
+                seen_ids.add(p["id"])
+                all_found.append(p)
+
+    all_found.reverse()
+    return all_found
 
 
 def format_post(proxy):
     return (
-        f"Server: {proxy['server']}\n"
-        f"Port: {proxy['port']}\n"
-        f"Secret: {proxy['secret']}\n"
+        f"Server: <code>{proxy['server']}</code>\n"
+        f"Port: <code>{proxy['port']}</code>\n"
+        f"Secret: <code>{proxy['secret']}</code>\n"
         f"{CHANNEL_ID}"
     )
 
@@ -128,7 +157,6 @@ def build_keyboard(proxy):
     connect_url = f"https://t.me/proxy?server={proxy['server']}&port={proxy['port']}&secret={proxy['secret']}"
     share_url = f"https://t.me/share/url?url={urllib.parse.quote(connect_url)}"
 
-    # Кнопки Подключиться и Поделиться в 1 ряд
     keyboard = InlineKeyboardMarkup([
         [
             InlineKeyboardButton("Подключиться", url=connect_url),
@@ -147,6 +175,7 @@ async def send_proxy(bot, proxy):
             chat_id=CHANNEL_ID,
             text=text,
             reply_markup=reply_markup,
+            parse_mode="HTML",
             disable_web_page_preview=True
         )
         print(f"[OK] Прокси отправлен: {proxy['server']}:{proxy['port']}", flush=True)
@@ -155,13 +184,13 @@ async def send_proxy(bot, proxy):
         print(f"[ОШИБКА ОТПРАВКИ] '{proxy['server']}': {e}", flush=True)
     finally:
         mark_posted(proxy["id"], proxy["server"], proxy["port"])
-        await asyncio.sleep(15)
+        await asyncio.sleep(5)
 
 
 async def run_once(bot):
-    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Ищу новые прокси...", flush=True)
-    proxies = fetch_proxies()
-    print(f"Всего найдено в источнике: {len(proxies)}", flush=True)
+    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Старт сканирования 7 каналов...", flush=True)
+    proxies = fetch_all_proxies()
+    print(f"Всего уникальных прокси найдено: {len(proxies)}", flush=True)
 
     new_proxies = [p for p in proxies if not is_posted(p["id"])]
     print(f"Новых прокси для публикации: {len(new_proxies)}", flush=True)
@@ -170,24 +199,13 @@ async def run_once(bot):
         await send_proxy(bot, p)
 
     if not new_proxies:
-        print("Все прокси уже были выложены ранее.", flush=True)
+        print("Новых прокси во всех 7 каналах не найдено.", flush=True)
 
 
 async def main():
     init_db()
     bot = Bot(token=BOT_TOKEN)
-    print("=" * 50, flush=True)
-    print("  TProxy -> Telegram Bot запущен!", flush=True)
-    print(f"  Канал публикации: {CHANNEL_ID}", flush=True)
-    print("  Интервал проверки: 1 – 1.5 часа", flush=True)
-    print("=" * 50, flush=True)
-
-    while True:
-        await run_once(bot)
-        wait_minutes = random.randint(60, 90)
-        hours = round(wait_minutes / 60, 1)
-        print(f"Следующая проверка через {wait_minutes} минут (~{hours} ч)...", flush=True)
-        await asyncio.sleep(wait_minutes * 60)
+    await run_once(bot)
 
 
 if __name__ == "__main__":
