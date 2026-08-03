@@ -1,0 +1,37 @@
+name: Auto Proxy Bot
+
+on:
+  schedule:
+    - cron: '0 * * * *'  # Автоматический запуск каждый час
+  workflow_dispatch:      # Кнопка для ручного запуска в любой момент
+
+jobs:
+  run-proxy-bot:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install python-telegram-bot==20.7 requests beautifulsoup4
+
+      - name: Run Bot
+        run: |
+          python bot.py
+
+      - name: Save DB back to GitHub
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add posted_proxies.db
+          git commit -m "auto: update database" || exit 0
+          git push
