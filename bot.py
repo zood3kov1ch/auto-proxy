@@ -10,7 +10,7 @@ import time
 import urllib.parse
 
 # ============================================================
-BOT_TOKEN = "8910826175:AAEEqMDhEbVW41NQwu383cxPPKa2P7BHU1k"
+BOT_TOKEN = "8257130619:AAEIFK3n_CSY3K0DOIDOCvEDHNJwBPYKULI"
 CHANNEL_ID = "@zood3llotgk_proxy"
 MAX_PROXIES_PER_RUN = 5
 
@@ -49,6 +49,7 @@ def init_db():
 
 def is_posted(proxy_id):
     conn = sqlite3.connect(DB_FILE)
+    # Важно: скобка с запятой (proxy_id,)
     cur = conn.execute("SELECT 1 FROM posted WHERE id = ?", (proxy_id,))
     result = cur.fetchone()
     conn.close()
@@ -149,7 +150,7 @@ def format_post(proxy):
         f"Server: <code>{proxy['server']}</code>\n"
         f"Port: <code>{proxy['port']}</code>\n"
         f"Secret: <code>{proxy['secret']}</code>\n"
-        f"{CHANNEL_ID}"
+        f"@zood3llotgk_proxy"
     )
 
 
@@ -178,7 +179,7 @@ async def send_proxy(bot, proxy):
             parse_mode="HTML",
             disable_web_page_preview=True
         )
-        print(f"[OK] Прокси отправлен: {proxy['server']}:{proxy['port']}", flush=True)
+        print(f"[OK] Прокси отправлен в Telegram: {proxy['server']}:{proxy['port']}", flush=True)
 
     except Exception as e:
         print(f"[ОШИБКА ОТПРАВКИ] '{proxy['server']}': {e}", flush=True)
