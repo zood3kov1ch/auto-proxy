@@ -10,7 +10,7 @@ import time
 import urllib.parse
 
 # ============================================================
-BOT_TOKEN = "8257130619:AAEIFK3n_CSY3K0DOIDOCvEDHNJwBPYKULI"
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 CHANNEL_ID = "@zood3llotgk_proxy"
 MAX_PROXIES_PER_RUN = 5
 
