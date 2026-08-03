@@ -2,8 +2,8 @@ name: Auto Proxy Bot
 
 on:
   schedule:
-    - cron: '*/5 * * * *'  # Автоматический запуск каждый час
-  workflow_dispatch:      # Кнопка для ручного запуска в любой момент
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
 
 jobs:
   run-proxy-bot:
@@ -25,6 +25,8 @@ jobs:
           pip install python-telegram-bot==20.7 requests beautifulsoup4
 
       - name: Run Bot
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
         run: |
           python bot.py
 
