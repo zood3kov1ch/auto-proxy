@@ -21,7 +21,9 @@ SOURCES = [
     "https://t.me/s/ProxyFreeMTProto",
     "https://t.me/s/MTPproxy",
     "https://t.me/s/ProxyCatalog_bot",
-    "https://t.me/s/ProxyFree_Ru"
+    "https://t.me/ConfigiHapp",
+    "https://t.me/s/ProxyFree_Ru",
+    "https://t.me/free_vpn123456"
 ]
 # ============================================================
 
