@@ -51,6 +51,19 @@ def init_db():
 
 def is_posted(proxy_id):
     conn = sqlite3.connect(DB_FILE)
+    cur = conn.execute("SELECT 1 FROM posted WHERE id = ?", (proxy_id,))
+    result = cur.fetchone()
+    conn.close()
+    return result is not None
+
+def is_server_posted_today(server):
+    conn = sqlite3.connect(DB_FILE)
+    today = datetime.now().strftime('%Y-%m-%d')
+    cur = conn.execute("SELECT 1 FROM posted WHERE server = ? AND posted_at LIKE ?", (server, f"{today}%"))
+    result = cur.fetchone()
+    conn.close()
+    return result is not None
+    conn = sqlite3.connect(DB_FILE)
     # Важно: скобка с запятой (proxy_id,)
     cur = conn.execute("SELECT 1 FROM posted WHERE id = ?", (proxy_id,))
     result = cur.fetchone()
