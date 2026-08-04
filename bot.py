@@ -208,7 +208,13 @@ async def run_once(bot):
     proxies = fetch_all_proxies()
     print(f"Всего уникальных прокси найдено: {len(proxies)}", flush=True)
 
-    new_proxies = [p for p in proxies if not is_posted(p["id"]) and not is_server_posted_today(p["server"])]
+    posted_servers = set()
+new_proxies = []
+for p in proxies:
+    key = f"{p['server']}:{p['port']}"
+    if not is_posted(p["id"]) and key not in posted_servers:
+        posted_servers.add(key)
+        new_proxies.append(p)
     print(f"Новых прокси для публикации: {len(new_proxies)}", flush=True)
 
     for p in new_proxies[:MAX_PROXIES_PER_RUN]:
