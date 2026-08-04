@@ -9,7 +9,6 @@ import os
 import time
 import urllib.parse
 
-# ============================================================
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 CHANNEL_ID = "@zood3llotgk_proxy"
 MAX_PROXIES_PER_RUN = 1
@@ -21,11 +20,8 @@ SOURCES = [
     "https://t.me/s/ProxyFreeMTProto",
     "https://t.me/s/MTPproxy",
     "https://t.me/s/ProxyCatalog_bot",
-    "https://t.me/ConfigiHapp",
-    "https://t.me/s/ProxyFree_Ru",
-    "https://t.me/free_vpn123456"
+    "https://t.me/s/ProxyFree_Ru"
 ]
-# ============================================================
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_FILE = os.path.join(BASE_DIR, "posted_proxies.db")
@@ -56,16 +52,10 @@ def is_posted(proxy_id):
     conn.close()
     return result is not None
 
-def is_server_posted_today(server):
+
+def is_server_posted(server, port):
     conn = sqlite3.connect(DB_FILE)
-    today = datetime.now().strftime('%Y-%m-%d')
-    cur = conn.execute("SELECT 1 FROM posted WHERE server = ? AND posted_at LIKE ?", (server, f"{today}%"))
-    result = cur.fetchone()
-    conn.close()
-    return result is not None
-    conn = sqlite3.connect(DB_FILE)
-    # Важно: скобка с запятой (proxy_id,)
-    cur = conn.execute("SELECT 1 FROM posted WHERE id = ?", (proxy_id,))
+    cur = conn.execute("SELECT 1 FROM posted WHERE server = ? AND port = ?", (server, port))
     result = cur.fetchone()
     conn.close()
     return result is not None
@@ -80,9 +70,9 @@ def mark_posted(proxy_id, server, port):
         )
         conn.commit()
         conn.close()
-        print(f"[DB] Прокси записан в базу: {server}:{port}", flush=True)
+        print(f"[DB] Записан: {server}:{port}", flush=True)
     except Exception as e:
-        print(f"[DB ОШИБКА] Не удалось записать: {e}", flush=True)
+        print(f"[DB ОШИБКА] {e}", flush=True)
 
 
 def fetch_proxies_from_source(url):
@@ -138,22 +128,22 @@ def fetch_proxies_from_source(url):
         return proxies
 
     except Exception as e:
-        print(f"[ОШИБКА ИСТОЧНИКА {url}] {e}", flush=True)
+        print(f"[ОШИБКА {url}] {e}", flush=True)
         return []
 
 
 def fetch_all_proxies():
     all_found = []
-    seen_ids = set()
+    seen_keys = set()
 
     for source_url in SOURCES:
         channel_name = source_url.split("/")[-1]
-        print(f"[ПАРСИНГ] Поиск в @{channel_name}...", flush=True)
-        
+        print(f"[ПАРСИНГ] @{channel_name}...", flush=True)
         found = fetch_proxies_from_source(source_url)
         for p in found:
-            if p["id"] not in seen_ids:
-                seen_ids.add(p["id"])
+            key = f"{p['server']}:{p['port']}"
+            if key not in seen_keys:
+                seen_keys.add(key)
                 all_found.append(p)
 
     all_found.reverse()
@@ -172,7 +162,6 @@ def format_post(proxy):
 def build_keyboard(proxy):
     connect_url = f"https://t.me/proxy?server={proxy['server']}&port={proxy['port']}&secret={proxy['secret']}"
     share_url = f"https://t.me/share/url?url={urllib.parse.quote(connect_url)}"
-
     keyboard = InlineKeyboardMarkup([
         [
             InlineKeyboardButton("Подключиться", url=connect_url),
@@ -185,7 +174,6 @@ def build_keyboard(proxy):
 async def send_proxy(bot, proxy):
     text = format_post(proxy)
     reply_markup = build_keyboard(proxy)
-
     try:
         await bot.send_message(
             chat_id=CHANNEL_ID,
@@ -194,34 +182,27 @@ async def send_proxy(bot, proxy):
             parse_mode="HTML",
             disable_web_page_preview=True
         )
-        print(f"[OK] Прокси отправлен в Telegram: {proxy['server']}:{proxy['port']}", flush=True)
-
+        print(f"[OK] Отправлен: {proxy['server']}:{proxy['port']}", flush=True)
     except Exception as e:
-        print(f"[ОШИБКА ОТПРАВКИ] '{proxy['server']}': {e}", flush=True)
+        print(f"[ОШИБКА ОТПРАВКИ] {e}", flush=True)
     finally:
         mark_posted(proxy["id"], proxy["server"], proxy["port"])
         await asyncio.sleep(5)
 
 
 async def run_once(bot):
-    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Старт сканирования 7 каналов...", flush=True)
+    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Старт...", flush=True)
     proxies = fetch_all_proxies()
-    print(f"Всего уникальных прокси найдено: {len(proxies)}", flush=True)
+    print(f"Найдено уникальных: {len(proxies)}", flush=True)
 
-    posted_servers = set()
-new_proxies = []
-for p in proxies:
-    key = f"{p['server']}:{p['port']}"
-    if not is_posted(p["id"]) and key not in posted_servers:
-        posted_servers.add(key)
-        new_proxies.append(p)
-    print(f"Новых прокси для публикации: {len(new_proxies)}", flush=True)
+    new_proxies = [p for p in proxies if not is_server_posted(p["server"], p["port"])]
+    print(f"Новых для публикации: {len(new_proxies)}", flush=True)
 
     for p in new_proxies[:MAX_PROXIES_PER_RUN]:
         await send_proxy(bot, p)
 
     if not new_proxies:
-        print("Новых прокси во всех 7 каналах не найдено.", flush=True)
+        print("Новых прокси нет.", flush=True)
 
 
 async def main():
