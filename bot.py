@@ -12,7 +12,7 @@ import urllib.parse
 # ============================================================
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 CHANNEL_ID = "@zood3llotgk_proxy"
-MAX_PROXIES_PER_RUN = 5
+MAX_PROXIES_PER_RUN = 1
 
 SOURCES = [
     "https://t.me/s/ProxyMTProto",
