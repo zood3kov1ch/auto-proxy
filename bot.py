@@ -13,6 +13,22 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 CHANNEL_ID = "@zood3llotgk_proxy"
 MAX_PROXIES_PER_RUN = 1
 
+# График по МСК: с 12:00 до 22:00, каждые 30 минут
+# Формат: (час, минута) по МСК
+SCHEDULE = [
+    (12, 0), (12, 30),
+    (13, 0), (13, 30),
+    (14, 0), (14, 30),
+    (15, 0), (15, 30),
+    (16, 0), (16, 30),
+    (17, 0), (17, 30),
+    (18, 0), (18, 30),
+    (19, 0), (19, 30),
+    (20, 0), (20, 30),
+    (21, 0), (21, 30),
+    (22, 0),
+]
+
 SOURCES = [
     "https://t.me/s/ProxyMTProto",
     "https://t.me/s/freedomvpnofficial",
@@ -30,6 +46,25 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
 
+MSK_OFFSET = 3  # UTC+3
+
+
+def get_msk_time():
+    from datetime import timezone, timedelta
+    msk = timezone(timedelta(hours=MSK_OFFSET))
+    return datetime.now(msk)
+
+
+def is_scheduled_time():
+    """Проверяем что сейчас время из графика (±10 минут допуск)"""
+    now = get_msk_time()
+    for (h, m) in SCHEDULE:
+        scheduled = now.replace(hour=h, minute=m, second=0, microsecond=0)
+        diff = abs((now - scheduled).total_seconds())
+        if diff <= 600:  # 10 минут допуск
+            return True
+    return False
+
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -43,14 +78,6 @@ def init_db():
     """)
     conn.commit()
     conn.close()
-
-
-def is_posted(proxy_id):
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.execute("SELECT 1 FROM posted WHERE id = ?", (proxy_id,))
-    result = cur.fetchone()
-    conn.close()
-    return result is not None
 
 
 def is_server_posted(server, port):
@@ -191,7 +218,13 @@ async def send_proxy(bot, proxy):
 
 
 async def run_once(bot):
-    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Старт...", flush=True)
+    now = get_msk_time()
+    print(f"\n[{now.strftime('%H:%M:%S')} МСК] Старт...", flush=True)
+
+    if not is_scheduled_time():
+        print(f"[ПРОПУСК] Сейчас не время по графику. МСК: {now.strftime('%H:%M')}", flush=True)
+        return
+
     proxies = fetch_all_proxies()
     print(f"Найдено уникальных: {len(proxies)}", flush=True)
 
