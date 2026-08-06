@@ -2,7 +2,7 @@ name: Auto Proxy Bot
 
 on:
   schedule:
-    - cron: '0,30 9-19 * * *'
+    - cron: '*/10 9-19 * * *'
   workflow_dispatch:
 
 jobs:
