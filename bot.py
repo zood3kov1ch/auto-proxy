@@ -109,6 +109,9 @@ def is_scheduled_time():
     иначе на один и тот же 30-минутный слот срабатывают сразу 2-3 соседних
     cron-тика подряд, и запускается несколько параллельных job'ов сразу,
     что и приводило к гонке при коммите базы.
+
+    При ручном запуске (workflow_dispatch) эта проверка вообще не должна
+    блокировать — см. её вызов в run_once().
     """
     now = get_msk_time()
     for (h, m) in SCHEDULE:
@@ -117,6 +120,15 @@ def is_scheduled_time():
         if diff <= 240:  # 4 минуты допуск
             return True
     return False
+
+
+def is_manual_trigger():
+    """True, если workflow запущен вручную кнопкой (workflow_dispatch),
+    а не по cron. GitHub Actions прокидывает это через переменную окружения
+    GITHUB_EVENT_NAME. При локальном запуске (её нет) тоже считаем ручным,
+    чтобы не мешать тестированию."""
+    event_name = os.environ.get("GITHUB_EVENT_NAME", "")
+    return event_name == "workflow_dispatch" or event_name == ""
 
 
 # ---------------------------------------------------------------------------
@@ -456,7 +468,10 @@ async def run_once(bot):
     now = get_msk_time()
     print(f"\n[{now.strftime('%H:%M:%S')} МСК] Старт...", flush=True)
 
-    if not is_scheduled_time():
+    manual = is_manual_trigger()
+    if manual:
+        print("[РУЧНОЙ ЗАПУСК] Проверка расписания пропущена.", flush=True)
+    elif not is_scheduled_time():
         print(f"[ПРОПУСК] Сейчас не время по графику. МСК: {now.strftime('%H:%M')}", flush=True)
         return
 
