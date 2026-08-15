@@ -147,6 +147,25 @@ def init_db():
             last_seen TEXT
         )
     """)
+
+    # МИГРАЦИЯ: если таблица posted существует с более старой версии бота
+    # (без колонок secret/last_seen), CREATE TABLE IF NOT EXISTS выше её
+    # не тронет — и тогда INSERT ниже будет падать с "no column named
+    # secret", запись в базу не будет происходить вообще, и бот будет
+    # публиковать один и тот же прокси заново каждый прогон. Добираем
+    # недостающие колонки на уже существующей таблице.
+    cur = conn.execute("PRAGMA table_info(posted)")
+    existing_cols = {row[1] for row in cur.fetchall()}
+    needed_cols = {
+        "secret": "TEXT",
+        "posted_at": "TEXT",
+        "last_seen": "TEXT",
+    }
+    for col, col_type in needed_cols.items():
+        if col not in existing_cols:
+            conn.execute(f"ALTER TABLE posted ADD COLUMN {col} {col_type}")
+            print(f"[DB МИГРАЦИЯ] Добавлена колонка '{col}' в таблицу posted", flush=True)
+
     conn.execute("""
         CREATE TABLE IF NOT EXISTS stats (
             key TEXT PRIMARY KEY,
@@ -218,7 +237,12 @@ def mark_posted(proxy_id, server, port, secret):
         conn.close()
         print(f"[DB] Записан: {server}:{port}", flush=True)
     except Exception as e:
-        print(f"[DB ОШИБКА] {e}", flush=True)
+        # Специально печатаем во весь голос и роняем процесс: если запись
+        # в базу не удалась, дедуп молча перестаёт работать и бот будет
+        # публиковать дубли бесконечно, не показывая явной ошибки в статусе
+        # запуска. Лучше явный Failure в Actions, чем тихий дублирующий баг.
+        print(f"[DB КРИТИЧЕСКАЯ ОШИБКА] Не удалось записать {server}:{port} — {e}", flush=True)
+        raise
 
 
 def cleanup_old_records(older_than_days=90):
