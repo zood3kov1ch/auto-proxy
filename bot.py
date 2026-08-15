@@ -32,9 +32,32 @@ WEB_SEARCH_QUERIES = [
     '"t.me/proxy?server=" MTProto прокси',
 ]
 
-# График по МСК: с 12:00 до 22:00, каждые 30 минут
+# ---------------------------------------------------------------------------
+# "Гарантированный" прокси
+# ---------------------------------------------------------------------------
+# ВАЖНО: гарантировать 100% работоспособность можно только для сервера,
+# который вы сами администрируете и держите поднятым (свой VPS с
+# MTProto-прокси). Для прокси, собранных из публичных каналов, никакой код
+# не может дать гарантию — сервер может лечь в любой момент вне зависимости
+# от бота. Впишите сюда данные СВОЕГО сервера через секреты репозитория
+# (GUARANTEED_PROXY_SERVER / _PORT / _SECRET), не хардкодьте их в файле.
+GUARANTEED_PROXY = {
+    "server": os.environ.get("GUARANTEED_PROXY_SERVER", ""),
+    "port": os.environ.get("GUARANTEED_PROXY_PORT", ""),
+    "secret": os.environ.get("GUARANTEED_PROXY_SECRET", ""),
+}
+# Раз в сколько успешных постов подряд вставлять гарантированный прокси
+# (дубль допустим специально — именно для него проверка на дубли не
+# применяется). Поставь 50 или 100, как нужно.
+INJECT_GUARANTEED_EVERY_N_POSTS = int(os.environ.get("INJECT_GUARANTEED_EVERY_N_POSTS", "75"))
+
+# График по МСК: с 8:00 до 22:00, каждые 30 минут
 # Формат: (час, минута) по МСК
 SCHEDULE = [
+    (8, 0), (8, 30),
+    (9, 0), (9, 30),
+    (10, 0), (10, 30),
+    (11, 0), (11, 30),
     (12, 0), (12, 30),
     (13, 0), (13, 30),
     (14, 0), (14, 30),
@@ -59,6 +82,8 @@ SOURCES = [
     "https://t.me/s/MTPproxy",
     "https://t.me/s/ProxyCatalog_bot",
     "https://t.me/s/ProxyFree_Ru",
+    "https://t.me/s/ConfigiHapp",
+    "https://t.me/s/tgmtproxylol",
 ]
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -78,12 +103,18 @@ def get_msk_time():
 
 
 def is_scheduled_time():
-    """Проверяем что сейчас время из графика (±10 минут допуск)"""
+    """
+    Проверяем что сейчас время из графика.
+    Допуск специально меньше половины интервала cron-триггера (10 минут),
+    иначе на один и тот же 30-минутный слот срабатывают сразу 2-3 соседних
+    cron-тика подряд, и запускается несколько параллельных job'ов сразу,
+    что и приводило к гонке при коммите базы.
+    """
     now = get_msk_time()
     for (h, m) in SCHEDULE:
         scheduled = now.replace(hour=h, minute=m, second=0, microsecond=0)
         diff = abs((now - scheduled).total_seconds())
-        if diff <= 600:  # 10 минут допуск
+        if diff <= 240:  # 4 минуты допуск
             return True
     return False
 
@@ -104,8 +135,34 @@ def init_db():
             last_seen TEXT
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS stats (
+            key TEXT PRIMARY KEY,
+            value INTEGER
+        )
+    """)
+    conn.execute("INSERT OR IGNORE INTO stats (key, value) VALUES ('total_posts', 0)")
     conn.commit()
     conn.close()
+
+
+def increment_and_get_total_posts():
+    """Увеличивает общий счётчик успешных постов на 1 и возвращает новое значение."""
+    conn = sqlite3.connect(DB_FILE)
+    conn.execute("UPDATE stats SET value = value + 1 WHERE key = 'total_posts'")
+    conn.commit()
+    cur = conn.execute("SELECT value FROM stats WHERE key = 'total_posts'")
+    row = cur.fetchone()
+    conn.close()
+    return row[0] if row else 0
+
+
+def get_total_posts():
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.execute("SELECT value FROM stats WHERE key = 'total_posts'")
+    row = cur.fetchone()
+    conn.close()
+    return row[0] if row else 0
 
 
 def get_posted_record(proxy_id):
@@ -379,7 +436,20 @@ async def send_proxy(bot, proxy):
         print(f"[ОШИБКА ОТПРАВКИ] {e}", flush=True)
     finally:
         mark_posted(proxy["id"], proxy["server"], proxy["port"], proxy["secret"])
+        increment_and_get_total_posts()
         await asyncio.sleep(5)
+
+
+def guaranteed_proxy_due():
+    """
+    True, если следующий пост должен быть "гарантированным" прокси
+    (раз в INJECT_GUARANTEED_EVERY_N_POSTS постов), и для него заданы
+    server/port/secret через переменные окружения.
+    """
+    if not (GUARANTEED_PROXY["server"] and GUARANTEED_PROXY["port"] and GUARANTEED_PROXY["secret"]):
+        return False
+    total = get_total_posts()
+    return (total + 1) % INJECT_GUARANTEED_EVERY_N_POSTS == 0
 
 
 async def run_once(bot):
@@ -388,6 +458,15 @@ async def run_once(bot):
 
     if not is_scheduled_time():
         print(f"[ПРОПУСК] Сейчас не время по графику. МСК: {now.strftime('%H:%M')}", flush=True)
+        return
+
+    # Раз в N постов принудительно публикуем закреплённый ("гарантированный")
+    # прокси — для него намеренно не проверяется дедуп/TTL, повтор допустим.
+    if guaranteed_proxy_due():
+        g = dict(GUARANTEED_PROXY)
+        g["id"] = f"{g['server']}:{g['port']}:{g['secret']}"
+        print(f"[ГАРАНТИРОВАННЫЙ] Публикуем закреплённый прокси: {g['server']}:{g['port']}", flush=True)
+        await send_proxy(bot, g)
         return
 
     proxies = fetch_all_proxies()
