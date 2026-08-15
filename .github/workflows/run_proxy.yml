@@ -2,8 +2,15 @@ name: Auto Proxy Bot
 
 on:
   schedule:
-    - cron: '*/10 9-19 * * *'
+    - cron: '*/10 5-19 * * *'
   workflow_dispatch:
+
+# Не даём двум запускам этого workflow выполняться одновременно.
+# Именно параллельные job'ы (cron + ручной запуск, или два соседних
+# тика cron) вызывали конфликт при сохранении posted_proxies.db.
+concurrency:
+  group: auto-proxy-bot
+  cancel-in-progress: false
 
 jobs:
   run-proxy-bot:
@@ -24,9 +31,20 @@ jobs:
         run: |
           pip install python-telegram-bot==20.7 requests beautifulsoup4
 
+      # Подтягиваем самую свежую версию базы ДО запуска бота, а не после.
+      # Так бот сразу видит актуальное состояние и на шаге push ниже
+      # не нужно сливать две разошедшиеся бинарные версии .db.
+      - name: Sync latest DB before run
+        run: |
+          git fetch origin main
+          git reset --hard origin/main
+
       - name: Run Bot
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          GUARANTEED_PROXY_SERVER: ${{ secrets.GUARANTEED_PROXY_SERVER }}
+          GUARANTEED_PROXY_PORT: ${{ secrets.GUARANTEED_PROXY_PORT }}
+          GUARANTEED_PROXY_SECRET: ${{ secrets.GUARANTEED_PROXY_SECRET }}
         run: |
           python bot.py
 
@@ -34,9 +52,26 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git stash
-          git pull --rebase origin main
-          git stash pop
+
+          if git diff --quiet -- posted_proxies.db && git diff --cached --quiet -- posted_proxies.db; then
+            echo "БД не изменилась, коммитить нечего"
+            exit 0
+          fi
+
           git add posted_proxies.db
-          git commit -m "auto: update database" || exit 0
-          git push
+          git commit -m "auto: update database"
+
+          # На случай если между Sync и этим шагом всё же прилетел чужой
+          # коммит (например, concurrency подвела) — пробуем перебазироваться
+          # и запушить с несколькими попытками вместо падения с exit code 1.
+          for i in 1 2 3; do
+            if git pull --rebase origin main && git push; then
+              echo "Push успешен"
+              exit 0
+            fi
+            echo "Попытка $i не удалась, повтор через 5 секунд..."
+            sleep 5
+          done
+
+          echo "Не удалось запушить БД после нескольких попыток"
+          exit 1
