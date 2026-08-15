@@ -45,6 +45,7 @@ jobs:
           GUARANTEED_PROXY_SERVER: ${{ secrets.GUARANTEED_PROXY_SERVER }}
           GUARANTEED_PROXY_PORT: ${{ secrets.GUARANTEED_PROXY_PORT }}
           GUARANTEED_PROXY_SECRET: ${{ secrets.GUARANTEED_PROXY_SECRET }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
         run: |
           python bot.py
 
