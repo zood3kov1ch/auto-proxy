@@ -3,7 +3,7 @@ import sqlite3
 import requests
 from bs4 import BeautifulSoup
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
-from datetime import datetime, timedelta
+from datetime import datetime
 import re
 import os
 import time
@@ -13,51 +13,22 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 CHANNEL_ID = "@zood3llotgk_proxy"
 MAX_PROXIES_PER_RUN = 1
 
-# Через сколько дней можно повторно опубликовать тот же proxy id
-# (server:port:secret), если он снова встретился и всё ещё жив.
-REPOST_AFTER_DAYS = 14
+# --- Гарантированный резервный прокси (fallback) ---
+# Если за последние GUARANTEED_FALLBACK_HOURS часов в канал не улетело
+# ни одного прокси (например, все источники исчерпаны/недоступны),
+# бот один раз постит этот резервный прокси, чтобы канал не "молчал".
+GUARANTEED_PROXY_SERVER = os.environ.get("GUARANTEED_PROXY_SERVER", "")
+GUARANTEED_PROXY_PORT = os.environ.get("GUARANTEED_PROXY_PORT", "")
+GUARANTEED_PROXY_SECRET = os.environ.get("GUARANTEED_PROXY_SECRET", "")
+GUARANTEED_FALLBACK_HOURS = 20
 
-# Проверка живости прокси
-CHECK_TIMEOUT = 5          # секунд на попытку TCP-коннекта
-CHECK_CONCURRENCY = 20     # сколько прокси проверяем параллельно
+# Событие, которым был запущен workflow (schedule / workflow_dispatch).
+# При ручном запуске игнорируем проверку расписания.
+GITHUB_EVENT_NAME = os.environ.get("GITHUB_EVENT_NAME", "")
 
-# Поиск по интернету (не только по каналам) через Google Custom Search API.
-# Нужно завести ключ и Search Engine ID (см. пояснение в конце файла).
-# Если не задано — этот источник просто пропускается.
-GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
-GOOGLE_CSE_ID = os.environ.get("GOOGLE_CSE_ID", "")
-WEB_SEARCH_QUERIES = [
-    'site:t.me "proxy?server="',
-    'inurl:"tg://proxy?server="',
-    '"t.me/proxy?server=" MTProto прокси',
-]
-
-# ---------------------------------------------------------------------------
-# "Гарантированный" прокси
-# ---------------------------------------------------------------------------
-# ВАЖНО: гарантировать 100% работоспособность можно только для сервера,
-# который вы сами администрируете и держите поднятым (свой VPS с
-# MTProto-прокси). Для прокси, собранных из публичных каналов, никакой код
-# не может дать гарантию — сервер может лечь в любой момент вне зависимости
-# от бота. Впишите сюда данные СВОЕГО сервера через секреты репозитория
-# (GUARANTEED_PROXY_SERVER / _PORT / _SECRET), не хардкодьте их в файле.
-GUARANTEED_PROXY = {
-    "server": os.environ.get("GUARANTEED_PROXY_SERVER", ""),
-    "port": os.environ.get("GUARANTEED_PROXY_PORT", ""),
-    "secret": os.environ.get("GUARANTEED_PROXY_SECRET", ""),
-}
-# Раз в сколько успешных постов подряд вставлять гарантированный прокси
-# (дубль допустим специально — именно для него проверка на дубли не
-# применяется). Поставь 50 или 100, как нужно.
-INJECT_GUARANTEED_EVERY_N_POSTS = int(os.environ.get("INJECT_GUARANTEED_EVERY_N_POSTS", "75"))
-
-# График по МСК: с 8:00 до 22:00, каждые 30 минут
+# График по МСК: с 12:00 до 22:00, каждые 30 минут
 # Формат: (час, минута) по МСК
 SCHEDULE = [
-    (8, 0), (8, 30),
-    (9, 0), (9, 30),
-    (10, 0), (10, 30),
-    (11, 0), (11, 30),
     (12, 0), (12, 30),
     (13, 0), (13, 30),
     (14, 0), (14, 30),
@@ -71,9 +42,6 @@ SCHEDULE = [
     (22, 0),
 ]
 
-# Список каналов-источников. Можно смело дописывать новые — чем больше
-# каналов, тем ниже риск "пересохнуть". Дубли между источниками отсекаются
-# автоматически по server:port:secret.
 SOURCES = [
     "https://t.me/s/ProxyMTProto",
     "https://t.me/s/freedomvpnofficial",
@@ -82,8 +50,6 @@ SOURCES = [
     "https://t.me/s/MTPproxy",
     "https://t.me/s/ProxyCatalog_bot",
     "https://t.me/s/ProxyFree_Ru",
-    "https://t.me/s/ConfigiHapp",
-    "https://t.me/s/tgmtproxylol",
 ]
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -97,197 +63,77 @@ MSK_OFFSET = 3  # UTC+3
 
 
 def get_msk_time():
-    from datetime import timezone
+    from datetime import timezone, timedelta
     msk = timezone(timedelta(hours=MSK_OFFSET))
     return datetime.now(msk)
 
 
 def is_scheduled_time():
-    """
-    Проверяем что сейчас время из графика.
-    Допуск специально меньше половины интервала cron-триггера (10 минут),
-    иначе на один и тот же 30-минутный слот срабатывают сразу 2-3 соседних
-    cron-тика подряд, и запускается несколько параллельных job'ов сразу,
-    что и приводило к гонке при коммите базы.
+    """Проверяем что сейчас время из графика (±10 минут допуск)."""
+    # Ручной запуск (workflow_dispatch) всегда пропускаем через график —
+    # иначе тестовый прогон вне получасового окна просто ничего не сделает.
+    if GITHUB_EVENT_NAME == "workflow_dispatch":
+        return True
 
-    При ручном запуске (workflow_dispatch) эта проверка вообще не должна
-    блокировать — см. её вызов в run_once().
-    """
     now = get_msk_time()
     for (h, m) in SCHEDULE:
         scheduled = now.replace(hour=h, minute=m, second=0, microsecond=0)
         diff = abs((now - scheduled).total_seconds())
-        if diff <= 240:  # 4 минуты допуск
+        if diff <= 600:  # 10 минут допуск
             return True
     return False
 
-
-def is_manual_trigger():
-    """True, если workflow запущен вручную кнопкой (workflow_dispatch),
-    а не по cron. GitHub Actions прокидывает это через переменную окружения
-    GITHUB_EVENT_NAME. При локальном запуске (её нет) тоже считаем ручным,
-    чтобы не мешать тестированию."""
-    event_name = os.environ.get("GITHUB_EVENT_NAME", "")
-    return event_name == "workflow_dispatch" or event_name == ""
-
-
-# ---------------------------------------------------------------------------
-# База данных
-# ---------------------------------------------------------------------------
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS posted (
-            id TEXT PRIMARY KEY,       -- server:port:secret (полный, а не только server:port)
+            id TEXT PRIMARY KEY,
             server TEXT,
             port TEXT,
-            secret TEXT,
-            posted_at TEXT,
-            last_seen TEXT
+            posted_at TEXT
         )
     """)
-
-    # МИГРАЦИЯ: если таблица posted существует с более старой версии бота
-    # (без колонок secret/last_seen), CREATE TABLE IF NOT EXISTS выше её
-    # не тронет — и тогда INSERT ниже будет падать с "no column named
-    # secret", запись в базу не будет происходить вообще, и бот будет
-    # публиковать один и тот же прокси заново каждый прогон. Добираем
-    # недостающие колонки на уже существующей таблице.
-    cur = conn.execute("PRAGMA table_info(posted)")
-    existing_cols = {row[1] for row in cur.fetchall()}
-    needed_cols = {
-        "secret": "TEXT",
-        "posted_at": "TEXT",
-        "last_seen": "TEXT",
-    }
-    for col, col_type in needed_cols.items():
-        if col not in existing_cols:
-            conn.execute(f"ALTER TABLE posted ADD COLUMN {col} {col_type}")
-            print(f"[DB МИГРАЦИЯ] Добавлена колонка '{col}' в таблицу posted", flush=True)
-
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS stats (
-            key TEXT PRIMARY KEY,
-            value INTEGER
-        )
-    """)
-    conn.execute("INSERT OR IGNORE INTO stats (key, value) VALUES ('total_posts', 0)")
     conn.commit()
     conn.close()
 
 
-def increment_and_get_total_posts():
-    """Увеличивает общий счётчик успешных постов на 1 и возвращает новое значение."""
+def is_server_posted(server, port):
     conn = sqlite3.connect(DB_FILE)
-    conn.execute("UPDATE stats SET value = value + 1 WHERE key = 'total_posts'")
-    conn.commit()
-    cur = conn.execute("SELECT value FROM stats WHERE key = 'total_posts'")
-    row = cur.fetchone()
+    cur = conn.execute("SELECT 1 FROM posted WHERE server = ? AND port = ?", (server, port))
+    result = cur.fetchone()
     conn.close()
-    return row[0] if row else 0
+    return result is not None
 
 
-def get_total_posts():
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.execute("SELECT value FROM stats WHERE key = 'total_posts'")
-    row = cur.fetchone()
-    conn.close()
-    return row[0] if row else 0
-
-
-def get_posted_record(proxy_id):
-    """Возвращает posted_at (datetime) для данного id, либо None."""
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.execute("SELECT posted_at FROM posted WHERE id = ?", (proxy_id,))
-    row = cur.fetchone()
-    conn.close()
-    if not row:
-        return None
-    try:
-        return datetime.fromisoformat(row[0])
-    except Exception:
-        return None
-
-
-def should_skip(proxy_id):
-    """
-    True, если этот конкретный proxy_id (server:port:secret) уже публиковался
-    недавно (< REPOST_AFTER_DAYS назад). Если secret у сервера сменился —
-    id будет другим, и это больше НЕ считается дублем.
-    Если тот же id "протух" по TTL — разрешаем опубликовать заново.
-    """
-    posted_at = get_posted_record(proxy_id)
-    if posted_at is None:
-        return False
-    return datetime.now() - posted_at < timedelta(days=REPOST_AFTER_DAYS)
-
-
-def mark_posted(proxy_id, server, port, secret):
+def mark_posted(proxy_id, server, port):
     try:
         conn = sqlite3.connect(DB_FILE)
-        now_iso = datetime.now().isoformat()
-        conn.execute("""
-            INSERT INTO posted (id, server, port, secret, posted_at, last_seen)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET posted_at = excluded.posted_at,
-                                           last_seen = excluded.last_seen
-        """, (proxy_id, server, port, secret, now_iso, now_iso))
+        conn.execute(
+            "INSERT OR IGNORE INTO posted (id, server, port, posted_at) VALUES (?, ?, ?, ?)",
+            (proxy_id, server, port, datetime.now().isoformat())
+        )
         conn.commit()
         conn.close()
         print(f"[DB] Записан: {server}:{port}", flush=True)
     except Exception as e:
-        # Специально печатаем во весь голос и роняем процесс: если запись
-        # в базу не удалась, дедуп молча перестаёт работать и бот будет
-        # публиковать дубли бесконечно, не показывая явной ошибки в статусе
-        # запуска. Лучше явный Failure в Actions, чем тихий дублирующий баг.
-        print(f"[DB КРИТИЧЕСКАЯ ОШИБКА] Не удалось записать {server}:{port} — {e}", flush=True)
-        raise
+        print(f"[DB ОШИБКА] {e}", flush=True)
 
 
-def cleanup_old_records(older_than_days=90):
-    """Опциональная чистка очень старых записей, чтобы база не росла бесконечно."""
+def hours_since_last_post():
+    """Сколько часов прошло с последнего успешного поста (любого прокси).
+    Если постов ещё не было — считаем, что прошло "бесконечно много"."""
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.execute("SELECT posted_at FROM posted ORDER BY posted_at DESC LIMIT 1")
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return float("inf")
     try:
-        conn = sqlite3.connect(DB_FILE)
-        cutoff = (datetime.now() - timedelta(days=older_than_days)).isoformat()
-        conn.execute("DELETE FROM posted WHERE posted_at < ?", (cutoff,))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"[DB CLEANUP ОШИБКА] {e}", flush=True)
-
-
-# ---------------------------------------------------------------------------
-# Парсинг Telegram-каналов
-# ---------------------------------------------------------------------------
-
-def extract_proxy_from_text(text, links):
-    proxy_link = None
-    for link in links:
-        if "proxy?" in link:
-            proxy_link = link
-            break
-    if not proxy_link:
-        match = re.search(r'(https://t\.me/proxy\?[^\s"<>]+|tg://proxy\?[^\s"<>]+)', text)
-        if match:
-            proxy_link = match.group(1)
-    if not proxy_link:
-        return None
-
-    clean_link = proxy_link.replace("tg://proxy", "https://t.me/proxy")
-    parsed = urllib.parse.urlparse(clean_link)
-    params = urllib.parse.parse_qs(parsed.query)
-    server = params.get("server", [""])[0]
-    port = params.get("port", [""])[0]
-    secret = params.get("secret", [""])[0]
-    if server and port and secret:
-        return {
-            "id": f"{server}:{port}:{secret}",
-            "server": server,
-            "port": port,
-            "secret": secret,
-        }
-    return None
+        last = datetime.fromisoformat(row[0])
+    except ValueError:
+        return float("inf")
+    return (datetime.now() - last).total_seconds() / 3600
 
 
 def fetch_proxies_from_source(url):
@@ -301,6 +147,7 @@ def fetch_proxies_from_source(url):
             time.sleep(2)
 
     if not resp or resp.status_code != 200:
+        print(f"[ИСТОЧНИК НЕДОСТУПЕН] {url} (status={resp.status_code if resp else 'нет ответа'})", flush=True)
         return []
 
     try:
@@ -309,131 +156,64 @@ def fetch_proxies_from_source(url):
         for msg in soup.select("div.tgme_widget_message"):
             text = msg.get_text()
             links = [a.get("href", "") for a in msg.select("a[href]")]
-            p = extract_proxy_from_text(text, links)
-            if p:
-                proxies.append(p)
+            proxy_link = None
+            for link in links:
+                if "proxy?" in link:
+                    proxy_link = link
+                    break
+            if not proxy_link:
+                match = re.search(r'(https://t\.me/proxy\?[^\s"<>]+|tg://proxy\?[^\s"<>]+)', text)
+                if match:
+                    proxy_link = match.group(1)
+
+            if proxy_link:
+                clean_link = proxy_link.replace("tg://proxy", "https://t.me/proxy")
+                parsed = urllib.parse.urlparse(clean_link)
+                params = urllib.parse.parse_qs(parsed.query)
+                server = params.get("server", [""])[0]
+                port = params.get("port", [""])[0]
+                secret = params.get("secret", [""])[0]
+                if server and port and secret:
+                    proxy_id = f"{server}:{port}:{secret}"
+                    proxies.append({
+                        "id": proxy_id,
+                        "server": server,
+                        "port": port,
+                        "secret": secret
+                    })
         return proxies
     except Exception as e:
         print(f"[ОШИБКА {url}] {e}", flush=True)
         return []
 
 
-# ---------------------------------------------------------------------------
-# Поиск по интернету (не только по заданным каналам)
-# ---------------------------------------------------------------------------
-
-def fetch_proxies_from_web_search():
-    """
-    Ищет ссылки вида t.me/proxy?server=... по всему интернету через
-    Google Programmable Search (Custom Search JSON API), а не только
-    в списке SOURCES. Требует GOOGLE_API_KEY и GOOGLE_CSE_ID.
-
-    Это НЕ полнотекстовый поиск по всем каналам Telegram — у самого
-    Telegram нет публичного API для поиска по всем каналам сразу.
-    Это поиск по тому, что уже проиндексировали поисковики (посты,
-    репосты, форумы, сайты-агрегаторы, где встречаются такие ссылки).
-    """
-    if not GOOGLE_API_KEY or not GOOGLE_CSE_ID:
-        return []
-
-    found = []
-    for query in WEB_SEARCH_QUERIES:
-        try:
-            resp = requests.get(
-                "https://www.googleapis.com/customsearch/v1",
-                params={
-                    "key": GOOGLE_API_KEY,
-                    "cx": GOOGLE_CSE_ID,
-                    "q": query,
-                    "num": 10,
-                },
-                timeout=15,
-            )
-            if resp.status_code != 200:
-                continue
-            data = resp.json()
-            for item in data.get("items", []):
-                blob = " ".join([
-                    item.get("link", ""),
-                    item.get("title", ""),
-                    item.get("snippet", ""),
-                ])
-                p = extract_proxy_from_text(blob, [item.get("link", "")])
-                if p:
-                    found.append(p)
-        except Exception as e:
-            print(f"[WEB SEARCH ОШИБКА] {query}: {e}", flush=True)
-    return found
-
-
 def fetch_all_proxies():
     all_found = []
-    seen_ids = set()
-
+    seen_keys = set()
     for source_url in SOURCES:
         channel_name = source_url.split("/")[-1]
         print(f"[ПАРСИНГ] @{channel_name}...", flush=True)
-        for p in fetch_proxies_from_source(source_url):
-            if p["id"] not in seen_ids:
-                seen_ids.add(p["id"])
+        found = fetch_proxies_from_source(source_url)
+        print(f"[РЕЗУЛЬТАТ] @{channel_name}: найдено {len(found)}", flush=True)
+        for p in found:
+            key = f"{p['server']}:{p['port']}"
+            if key not in seen_keys:
+                seen_keys.add(key)
                 all_found.append(p)
-
-    print("[ПАРСИНГ] web search...", flush=True)
-    for p in fetch_proxies_from_web_search():
-        if p["id"] not in seen_ids:
-            seen_ids.add(p["id"])
-            all_found.append(p)
-
     all_found.reverse()
     return all_found
 
 
-# ---------------------------------------------------------------------------
-# Проверка живости прокси
-# ---------------------------------------------------------------------------
+def get_guaranteed_proxy():
+    if GUARANTEED_PROXY_SERVER and GUARANTEED_PROXY_PORT and GUARANTEED_PROXY_SECRET:
+        return {
+            "id": f"{GUARANTEED_PROXY_SERVER}:{GUARANTEED_PROXY_PORT}:{GUARANTEED_PROXY_SECRET}",
+            "server": GUARANTEED_PROXY_SERVER,
+            "port": GUARANTEED_PROXY_PORT,
+            "secret": GUARANTEED_PROXY_SECRET,
+        }
+    return None
 
-async def check_proxy_alive(server, port, timeout=CHECK_TIMEOUT):
-    """
-    Простая проверка: открывается ли TCP-соединение на server:port.
-    Это не полноценная проверка MTProto-хендшейка (для неё нужно слать
-    правильный секрет и разбирать ответ), но она отсекает большинство
-    мёртвых/недоступных прокси — сервер выключен, порт закрыт, домен не
-    резолвится и т.д.
-    """
-    try:
-        port_int = int(port)
-    except ValueError:
-        return False
-    try:
-        conn = asyncio.open_connection(server, port_int)
-        reader, writer = await asyncio.wait_for(conn, timeout=timeout)
-        writer.close()
-        try:
-            await writer.wait_closed()
-        except Exception:
-            pass
-        return True
-    except Exception:
-        return False
-
-
-async def filter_alive_proxies(proxies):
-    sem = asyncio.Semaphore(CHECK_CONCURRENCY)
-    alive = []
-
-    async def check(p):
-        async with sem:
-            ok = await check_proxy_alive(p["server"], p["port"])
-            if ok:
-                alive.append(p)
-
-    await asyncio.gather(*(check(p) for p in proxies))
-    return alive
-
-
-# ---------------------------------------------------------------------------
-# Публикация в канал
-# ---------------------------------------------------------------------------
 
 def format_post(proxy):
     return (
@@ -471,68 +251,43 @@ async def send_proxy(bot, proxy):
     except Exception as e:
         print(f"[ОШИБКА ОТПРАВКИ] {e}", flush=True)
     finally:
-        mark_posted(proxy["id"], proxy["server"], proxy["port"], proxy["secret"])
-        increment_and_get_total_posts()
+        mark_posted(proxy["id"], proxy["server"], proxy["port"])
         await asyncio.sleep(5)
-
-
-def guaranteed_proxy_due():
-    """
-    True, если следующий пост должен быть "гарантированным" прокси
-    (раз в INJECT_GUARANTEED_EVERY_N_POSTS постов), и для него заданы
-    server/port/secret через переменные окружения.
-    """
-    if not (GUARANTEED_PROXY["server"] and GUARANTEED_PROXY["port"] and GUARANTEED_PROXY["secret"]):
-        return False
-    total = get_total_posts()
-    return (total + 1) % INJECT_GUARANTEED_EVERY_N_POSTS == 0
 
 
 async def run_once(bot):
     now = get_msk_time()
-    print(f"\n[{now.strftime('%H:%M:%S')} МСК] Старт...", flush=True)
+    print(f"\n[{now.strftime('%H:%M:%S')} МСК] Старт... (event={GITHUB_EVENT_NAME or 'schedule'})", flush=True)
 
-    manual = is_manual_trigger()
-    if manual:
-        print("[РУЧНОЙ ЗАПУСК] Проверка расписания пропущена.", flush=True)
-    elif not is_scheduled_time():
+    if not is_scheduled_time():
         print(f"[ПРОПУСК] Сейчас не время по графику. МСК: {now.strftime('%H:%M')}", flush=True)
-        return
-
-    # Раз в N постов принудительно публикуем закреплённый ("гарантированный")
-    # прокси — для него намеренно не проверяется дедуп/TTL, повтор допустим.
-    if guaranteed_proxy_due():
-        g = dict(GUARANTEED_PROXY)
-        g["id"] = f"{g['server']}:{g['port']}:{g['secret']}"
-        print(f"[ГАРАНТИРОВАННЫЙ] Публикуем закреплённый прокси: {g['server']}:{g['port']}", flush=True)
-        await send_proxy(bot, g)
         return
 
     proxies = fetch_all_proxies()
     print(f"Найдено уникальных: {len(proxies)}", flush=True)
 
-    candidates = [p for p in proxies if not should_skip(p["id"])]
-    print(f"Кандидатов (с учётом TTL): {len(candidates)}", flush=True)
+    new_proxies = [p for p in proxies if not is_server_posted(p["server"], p["port"])]
+    print(f"Новых для публикации: {len(new_proxies)}", flush=True)
 
-    if not candidates:
-        print("Новых прокси нет.", flush=True)
-        return
-
-    print("[ПРОВЕРКА] Тестируем доступность прокси...", flush=True)
-    alive = await filter_alive_proxies(candidates)
-    print(f"Живых прокси: {len(alive)} из {len(candidates)}", flush=True)
-
-    if not alive:
-        print("Живых новых прокси нет.", flush=True)
-        return
-
-    for p in alive[:MAX_PROXIES_PER_RUN]:
+    for p in new_proxies[:MAX_PROXIES_PER_RUN]:
         await send_proxy(bot, p)
+
+    if not new_proxies:
+        idle_hours = hours_since_last_post()
+        print(f"Новых прокси нет. Часов с последнего поста: {idle_hours:.1f}", flush=True)
+        if idle_hours >= GUARANTEED_FALLBACK_HOURS:
+            fallback = get_guaranteed_proxy()
+            if fallback:
+                print("[FALLBACK] Публикуем гарантированный резервный прокси", flush=True)
+                # Гарантированный прокси может быть уже отмечен как "posted" —
+                # это ок, нам важно только реально отправить его в канал.
+                await send_proxy(bot, fallback)
+            else:
+                print("[FALLBACK] Резервный прокси не настроен (нет секретов GUARANTEED_PROXY_*)", flush=True)
 
 
 async def main():
     init_db()
-    cleanup_old_records()
     bot = Bot(token=BOT_TOKEN)
     await run_once(bot)
 
